@@ -1,0 +1,859 @@
+---
+title: 'BetterAir: ITS Sequencing Library Report'
+author: 'Mhuireach, G.A., Horve, P., Vandegrift, R., Van Den Wymelenberg, K.'
+date: '`r format(Sys.time(), "%B %d, %Y")`'
+output:
+  pdf_document: default
+  word_document:
+  html_notebook:
+    fig_caption: yes
+header-includes: \usepackage{graphicx}
+---
+
+# Introduction
+
+Microbial community dynamics are complex, and driven by ecological processes. We view probiotic microorganisms as invasive species with high propagule density; as such, they may have an effect on the established microbial community through altered competition and facilitation interactions. 
+
+The primary objective of this interim report is to provide BetterAir with data that they can use to estimate the effect of probiotic treatment on existing microbial community. This includes a provision of data to allow BetterAir to quantify the effect of treatment on common human-associated microbial communities through time with respect to alterations in community structure, diversity, and relative abundances of target organisms. As per the Scope of Work, this report provides only basic description of community structure and dynamics, *not* detailed analyses.
+
+Our hypotheses were:
+
+1. The Enviro-Biotic spritzer adds a consistent dose of known (to the proprietors) microbes to room air, which is then deposited onto horizontal surfaces.
+
+    - Test by comparing treated vs. non-treated samples containing sterilized dust.  
+
+2. Enviro-Biotic microbes alter the structure of existing microbial communities both through their addition to the community and through subsequent interactions (e.g., competition and predation) with other microbes.
+
+    - Test by comparing treated vs. non-treated samples containing live dust, first on Day 1, then over time.
+
+
+```{r global_options, eval=TRUE, include=FALSE, results="hide", message=FALSE, warning=FALSE, error=TRUE}
+library(knitr)
+knitr::opts_knit$set(root.dir=normalizePath('../'))
+knitr::opts_chunk$set(dev='pdf', fig.pos = 'h', echo=FALSE, warning=FALSE, message=FALSE, error=TRUE)
+```
+
+```{r initialSetup, eval=TRUE, include=FALSE, results="hide"}
+
+set.seed(2)
+options(scipen=7)  # curtail scientific notation
+options(digits=2) # number of digits to print on output 
+
+# install DADA2 for paired-end read assembly (instead of QIIME/Keaton's pipeline)
+#source("https://bioconductor.org/biocLite.R")
+#biocLite("dada2")
+# also install ShortRead for DADA2 workflow
+#biocLite("DESeq2")
+#biocLite("phyloseq")
+
+# The required package list:
+reqpkg <- c("DESeq2", "ggplot2", "phyloseq", "vegan", "ape", "VennDiagram", "tidyr", "plyr", "dplyr", "viridis", "data.table", "lme4")
+# Load all required packages and show version
+for (i in reqpkg) {
+    print(i)
+    print(packageVersion(i))
+    library(i, quietly = TRUE, verbose = FALSE, warn.conflicts = FALSE, character.only = TRUE)
+}
+
+## load extra functions
+# function to extract OTU table from phyloseq and ensure samples are rows
+getTab <- function(physeq) {
+  require("vegan")
+  OTU = otu_table(physeq)
+  if (taxa_are_rows(OTU)) {
+    OTU = t(OTU)
+  }
+  return(as(OTU, "matrix"))
+}
+
+# set ggplot2 theme elements
+theme_set(theme_bw(base_size=12))
+
+# define palettes
+genus.pal <- read.csv("/Users/gwynhwyfer/Documents/ESBL/projects/BetterAir/genpal_fung.csv", header=FALSE, stringsAsFactors = FALSE)
+genus.pal[genus.pal[,1]=="Other", 2] <- "darkgrey"
+genus.pal <- structure(genus.pal[,2], names=genus.pal[,1])
+#family.pal <-
+#class.pal
+#phyla.pal
+period.pal <- c(before="coral1", during="turquoise3", after="grey30")
+condition.pal <- c(live="orchid3", sterile="darkgoldenrod")
+treatment.pal <- c(Control="cornsilk4", EnviroBiotics="firebrick1")
+
+```
+
+# Methods
+
+We conducted a controlled trial of the BetterAir Biodify™ device to provide BetterAir with data that they can use to establish the effects of the Enviro-Biotics mixture and delivery method on existing microbial communities. We used a standardized human-associated microbial community (HAMC) obtained from homogenized and filtered vacuum cleaner dust sourced from an occupied building. The course of treatment was two weeks of use of the Biodify™ device with standard settings in the BioBE Climate Chamber (interior dimensions = c. 3.7 m long $\times$ 2.4 m wide $\times$ 2.9 m high; 25.75 m^3) with humidity, air temperature, and air exchange rates held constant throughout the duration of the experiment and within the range typical of residential/commercial buildings. Air was filtered to MERV 15. 
+
+We used settling plates (100 mm diameter petri dishes) for microbial collection. Sampling devices were pre-loaded with either live or sterilized HAMC and were sampled at varying frequencies according to expected trends from each group, with two replicates per group per day. Sampling days were as follows: Day 0 // start treatment // D1, D2, D3, D6, D10, D14 // stop treatment // D15, D16, D17, D21. This same sampling protocol was used twice: once for treatment with the Enviro-Biotic mixture, and once for the control, using the device with sterile fluid (no microbes). Thus a total of 88 samples were collected (11 sampling days $\times$ 2 conditions [live vs. sterile dust] $\times$ 2 replicates $\times$ 2 treatments [Enviro-Biotics vs. control]).
+
+High-throughput sequencing on the Illumina MiSeq platform was used to generate meta-barcode data of bacterial ITS rRNA and fungal ITS. These data were used to track changes in community structure through time in response to treatment, as compared to changes through time without treatment (compared to sterile fluid control).
+
+We used the `R` statistical computing environment for all pre-processing and analyses, in particular packages ``r reqpkg``. With this report we have included the following deliverables:
+
+- Meta-barcode sequencing library data files (raw community sequencing results) containing all sequences, both forward and reverse reads, resulting from the Illumina MiSeq run.
+    
+- A metadata file for the Illumina MiSeq run, listing sample information for each sequencing barcode.
+    
+- A BIOM table file containing the abundances of all microbial taxa in each sample.
+
+Due to poor quality of the reverse reads (typical of Illumina paired-end ) and low overlap, this report uses only the forward reads for analyses.
+
+```{r importDada, eval=TRUE, include=FALSE, results="hide"}
+# import OTU tables
+otu.ITS <- readRDS("/Users/gwynhwyfer/Documents/ESBL/projects/BetterAir/seqtab.nochim_ITS_fReads.rds")
+#otu.ITS.nolap <- readRDS("/Users/gwynhwyfer/Documents/ESBL/projects/BetterAir/seqtab.nochim_ITS_noOverlap.rds")
+
+# import taxa tables
+tax.ITS <- readRDS("/Users/gwynhwyfer/Documents/ESBL/projects/BetterAir/ITStaxa_fReads.rds")
+#tax.ITS.nolap <- readRDS("/Users/gwynhwyfer/Documents/ESBL/projects/BetterAir/ITStaxa_noOverlap.rds")
+# remove prepending taxonomic identifier (e.g., "s__")
+tax.ITS <- gsub("[a-z]__", "", tax.ITS)
+
+# check that otu table sample names will match with sample data
+row.names(otu.ITS)[1:5]
+row.names(otu.ITS) <- gsub("blue-treatment", "T", row.names(otu.ITS))
+row.names(otu.ITS) <- gsub("red-control", "C", row.names(otu.ITS))
+strsplit(row.names(otu.ITS), "")
+#write.csv(row.names(otu.ITS), "sampleNames.csv")
+colnames(otu.ITS)[1:5]
+row.names(tax.ITS)[1:5]
+
+# import sample data
+mapfile <- as.data.frame(read.table("/Users/gwynhwyfer/Documents/ESBL/projects/BetterAir/betterair_seqmap.txt",
+                                   header = TRUE))
+# check
+head(mapfile)
+# fix things - make Sample names be the row names
+row.names(mapfile) <- mapfile$Sample
+# make Day be a factor rather than integer
+mapfile$Day <- as.factor(mapfile$Day)
+# add variable for Period (before/during/after treatment)
+mapfile$Period <- "during"
+mapfile[as.numeric(as.character(mapfile$Day)) == 0, "Period"] <- "before"
+mapfile[as.numeric(as.character(mapfile$Day)) > 14, "Period"] <- "after"
+mapfile$Period <- as.factor(mapfile$Period)
+# control factor ordering, first by Condition then by Treatment then by Day
+mapfile$Sample <- factor(mapfile$Sample, levels=mapfile$Sample[order(mapfile$Condition, mapfile$Treatment, mapfile$Day)])
+
+fung <- phyloseq(otu_table(otu.ITS, taxa_are_rows=FALSE), tax_table(tax.ITS), sample_data(mapfile))
+#is.rooted(phy_tree(fung))
+#phy_tree(fung) <- root(phy_tree(fung), sample(taxa_names(fung), 1), resolve.root = TRUE)
+new.names <- paste0("ASV", seq(ntaxa(fung))) # Define new names ASV1, ASV2, ...
+seqs <- taxa_names(fung) # Store sequences
+names(seqs) <- new.names # Make map from ASV1 to full sequence
+taxa_names(fung) <- new.names # Rename to human-friendly format
+#You can always convert back to the full sequences later using seqs. For example, seqs["ASV1"]
+
+rm(otu.ITS, tax.ITS, mapfile)
+
+#write.csv(otu_table(fung), "seqTable_ITS.csv")
+
+```
+
+```{r explore, eval=TRUE, include=FALSE, results="hide"}
+
+# explore similarity among all samples, including vents, controls, and pure EnviroBiotic solution
+plot_ordination(fung, ordinate(fung, method="PCoA", distance="horn"), type="samples", color="Condition", label="Sample")
+
+# remove outlier (C_CON0R) - possibly mislabelled. It looks suspiciously similar to the live dust samples.
+fung <- prune_samples(sample_data(fung)$Sample != "C_CON0R", fung)
+
+```
+
+```{r basicInfo, eval=TRUE, include=FALSE, results="hide"}
+
+# separate sample types
+sort(sample_sums(fung))
+sample_data(fung)
+exhaust <- prune_samples(sample_data(fung)$Condition=="exhaust_vent", fung)
+exhaust <- prune_taxa(taxa_sums(exhaust) != 0, exhaust)
+intake <- prune_samples(sample_data(fung)$Condition=="intake_vent", fung)
+intake <- prune_taxa(taxa_sums(intake) != 0, intake)
+comm_std <- prune_samples(sample_data(fung)$Condition=="community_standard", fung)
+comm_std <- prune_taxa(taxa_sums(comm_std) != 0, comm_std)
+pure_eb <- prune_samples(c("T_EB21P", "C_EB2", "C_EB1"), fung)
+pure_eb <- prune_taxa(taxa_sums(pure_eb) != 0, pure_eb)
+others <- prune_samples(c("No_Plate_IC", "PLATE_A_NTC", "PLATE_B_NTC_barcode_H12", "C_C21"), fung)
+others <- prune_taxa(taxa_sums(others) != 0, others)
+art_comm <- prune_samples(sample_data(fung)$Condition=="Artificial_Community", fung)
+art_comm <- prune_taxa(taxa_sums(art_comm) != 0, art_comm)
+# remove non-experimental groups (e.g., EnviroBiotics solution, community standard, exhaust vent)
+exp <- prune_samples(sample_data(fung)$Treatment != "None", fung)
+exp <- prune_taxa(taxa_sums(exp) != 0, exp)
+# remove samples with < 10 reads
+fails <- prune_samples(sample_sums(exp) < 10, exp)
+fails <- prune_taxa(taxa_sums(fails) != 0, fails)
+exp <- prune_samples(sample_sums(exp) >= 10, exp)
+
+# remove doubletons (DADA2 already removes singletons automatically)
+nosing <- prune_taxa(taxa_sums(exp) > 2, exp) 
+sort(sample_sums(exp)) # numbers of reads in each sample
+sum(sample_sums(exp)) # total number of reads, including doubletons
+sum(sample_sums(exp))-sum(sample_sums(nosing)) #number of doubletons
+
+ntaxa(nosing) # total number of taxa, excluding single/doubletons
+length(get_taxa_unique(nosing, "Phylum")) # number of different Phyla represented
+
+# split groups by conditions (sterile vs live dust)
+sterile <- prune_samples(sample_data(nosing)$Condition=="sterile", nosing)
+sterile <- prune_taxa(taxa_sums(sterile) != 0, sterile)
+live <- prune_samples(sample_data(nosing)$Condition=="live", nosing)
+live <- prune_taxa(taxa_sums(live) != 0, live)
+
+# split groups by treatment (Enviro-Biotics vs control)
+EB <- prune_samples(sample_data(nosing)$Treatment=="EnviroBiotics", nosing)
+EB <- prune_taxa(taxa_sums(EB) != 0, EB)
+control <- prune_samples(sample_data(nosing)$Treatment=="Control", nosing)
+control <- prune_taxa(taxa_sums(control) != 0, control)
+
+# split groups by treatment (Enviro-Biotics vs control)
+sterile_EB <- prune_samples(sample_data(sterile)$Treatment=="EnviroBiotics", sterile)
+sterile_EB <- prune_taxa(taxa_sums(sterile_EB) != 0, sterile_EB)
+sterile_control <- prune_samples(sample_data(sterile)$Treatment=="Control", sterile)
+sterile_control <- prune_taxa(taxa_sums(sterile_control) != 0, sterile_control)
+
+live_EB <- prune_samples(sample_data(live)$Treatment=="EnviroBiotics", live)
+live_EB <- prune_taxa(taxa_sums(live_EB) != 0, live_EB)
+live_control <- prune_samples(sample_data(live)$Treatment=="Control", live)
+live_control <- prune_taxa(taxa_sums(live_control) != 0, live_control)
+
+```
+
+```{r transformData, eval=FALSE, include=FALSE, results="hide"}
+
+# variance stabilizing transformation only on experimental groups
+# this design measures the effect of Treatment, controlling for Day and Condition. In order to benefit from the default settings of the package, you should put the variable of interest at the end of the formula and make sure the control level is the first level.
+sample_names(nosing) # confirm these are only the experimental groups
+nosing.des <- phyloseq_to_deseq2(nosing, ~ Day + Condition + Treatment)
+# calculate geometric means prior to estimate size factors if error with too many zeros
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(nosing.des), 1, gm_mean)
+nosing.des <- estimateSizeFactors(nosing.des, geoMeans = geoMeans)
+nosing.des <- estimateDispersions(nosing.des, fitType="local", maxit=260)
+# perform DESeq2 variance stabilization instead of rarefying
+nosing.vst <- getVarianceStabilizedData(nosing.des)
+# Save the untransformed data as a separate variable so you can go back to it
+nosing0 <- nosing
+otu_table(nosing) <- otu_table(nosing.vst, taxa_are_rows=TRUE)
+nosing.vst <- nosing
+nosing <- nosing0
+# Set values below zero, to zero
+otu_table(nosing.vst)[otu_table(nosing.vst) < 0.0] <- 0
+
+rm(nosing0)
+
+saveRDS(nosing.vst, "nosing.vst.fung.rds")
+
+```
+
+```{r splitData, eval=TRUE, include=TRUE, results="hide"}
+
+nosing.vst <- readRDS("/Users/gwynhwyfer/Documents/ESBL/projects/BetterAir/nosing.vst.fung.rds")
+  
+# split groups by conditions (sterile vs live dust)
+sterile.vst <- prune_samples(sample_data(nosing)$Condition=="sterile", nosing)
+sterile.vst <- prune_taxa(taxa_sums(sterile.vst) != 0, sterile.vst)
+live.vst <- prune_samples(sample_data(nosing)$Condition=="live", nosing)
+live.vst <- prune_taxa(taxa_sums(live.vst) != 0, live.vst)
+
+# split groups by treatment (Enviro-Biotics vs control)
+EB.vst <- prune_samples(sample_data(nosing)$Treatment=="EnviroBiotics", nosing)
+EB.vst <- prune_taxa(taxa_sums(EB.vst) != 0, EB.vst)
+control.vst <- prune_samples(sample_data(nosing)$Treatment=="Control", nosing)
+control.vst <- prune_taxa(taxa_sums(control.vst) != 0, control.vst)
+
+# split groups by treatment (Enviro-Biotics vs control)
+sterile_EB.vst <- prune_samples(sample_data(sterile)$Treatment=="EnviroBiotics", sterile)
+sterile_EB.vst <- prune_taxa(taxa_sums(sterile_EB.vst) != 0, sterile_EB.vst)
+sterile_control.vst <- prune_samples(sample_data(sterile)$Treatment=="Control", sterile)
+sterile_control.vst <- prune_taxa(taxa_sums(sterile_control.vst) != 0, sterile_control.vst)
+
+live_EB.vst <- prune_samples(sample_data(live)$Treatment=="EnviroBiotics", live)
+live_EB.vst <- prune_taxa(taxa_sums(live_EB.vst) != 0, live_EB.vst)
+live_control.vst <- prune_samples(sample_data(live)$Treatment=="Control", live)
+live_control.vst <- prune_taxa(taxa_sums(live_control.vst) != 0, live_control.vst)
+
+# relative abundance transformations
+exp.Rel <- transform_sample_counts(exp, function(x) x/sum(x))
+nosing.rel <- transform_sample_counts(nosing, function(x) 100 * x/sum(x))
+sterile.rel <- transform_sample_counts(sterile, function(x) 100 * x/sum(x))
+live.rel <- transform_sample_counts(live, function(x) 100 * x/sum(x))
+
+```
+
+# Results
+
+In this study, we observed a total of `r {prettyNum(sum(sample_sums(exp)), format="d", big.mark=",")}` sequence reads across all experimental samples. Of these, `r {prettyNum(sum(sample_sums(exp))-sum(sample_sums(nosing)), format="d", big.mark=",")}` were singletons or doubletons (i.e., observed only once or twice in the whole dataset), which were removed from all downstream analyses, except for alpha diversity. The number of reads per sample ranged from `r {prettyNum(min(sample_sums(exp)), format="d", big.mark=",")}` to `r {prettyNum(max(sample_sums(exp)), format="d", big.mark=",")}`, although `r {length(row.names(otu_table(fails)))}` samples ("`r {sample_data(fails)$Sample[1]}`" and "`r {sample_data(fails)$Sample[2]}`") were below our threshold of 10,000 reads and were removed from downstream analyses. A total of `r {prettyNum(ntaxa(nosing), format="d", big.mark=",")}` different taxa were observed, representing `r {length(get_taxa_unique(nosing, "Phylum"))}` unique phlya. The most abundant taxa found in the pure Enviro-Biotics solutions are shown in Table 1.
+
+```{r EBtaxa, eval=TRUE, include=TRUE, results="asis"}
+
+#top 4 SVs in EnviroBiotics samples
+top.names <- names(sort(taxa_sums(pure_eb), TRUE))[1:10] #top 4 SVs
+top.prune <- prune_taxa(top.names, pure_eb)
+top.sums <- data.frame(taxa_sums(top.prune)/sum(sample_sums(pure_eb)))
+# get taxonomic Families of top 10
+top.tax <- tax_table(top.prune)[, c("Phylum", "Class", "Order", "Family", "Genus")]
+topEB.df <- data.frame(as(top.tax, "matrix"))
+topEB.df <- cbind(topEB.df, top.sums)
+names(topEB.df)[6] <- "Abundance"
+topEB.df <- topEB.df[order(as.numeric(as.character(-topEB.df[,6]))), ]
+
+kable(topEB.df[,5:6], format = 'pandoc', caption = 'Most abundant fungal taxa in Enviro-Biotics')
+
+```
+
+### Alpha diversity
+
+```{r shannonTest, eval=TRUE, include=FALSE, results="hide"}
+
+# test alpha diversity for sterile dust
+rich <- estimate_richness(sterile, measures="Shannon")
+rich$Treatment <- sample_data(sterile)$Treatment
+t_shannon_sterile <- t.test(rich$Shannon ~ rich$Treatment)
+
+# test alpha diversity for live dust
+rich <- estimate_richness(live, measures="Shannon")
+rich$Treatment <- sample_data(live)$Treatment
+t_shannon_live <- t.test(rich$Shannon ~ rich$Treatment)
+
+```
+
+```{r shannonTreatment, eval=TRUE, include=FALSE, results="hide", fig.width=5, fig.height=4, fig.show="hold", fig.align="center", fig.cap="\\label{fig:shannonTreatment}Alpha diversity by treatment (EnviroBiotics vs. control)"}
+
+# test and plot alpha diversity for Enviro-biotic treatment
+rich <- estimate_richness(control, measures="Shannon")
+rich$Condition <- sample_data(control)$Condition
+t_shannon_treat_control <- t.test(rich$Shannon ~ rich$Condition)
+plot_richness(control, x="Condition", color="Condition", title=NULL, measures="Shannon") +
+  geom_boxplot() +
+  scale_color_manual(values=condition.pal)
+ggsave("shannon_control.pdf")
+
+# test and plot alpha diversity for Enviro-biotic treatment
+rich <- estimate_richness(EB, measures="Shannon")
+rich$Condition <- sample_data(EB)$Condition
+t_shannon_treat_EB <- t.test(rich$Shannon ~ rich$Condition)
+plot_richness(EB, x="Condition", color="Condition", title=NULL, measures="Shannon") +
+  geom_boxplot() +
+  scale_color_manual(values=condition.pal)
+ggsave("shannon_EB.pdf")
+
+rm(rich)
+```
+
+Alpha diversity estimates for treatment vs. control and sterile vs. live dust are shown in Figure \ref{fig:shannonPlots}, calculated using the Shannon index. Control samples had slightly higher alpha diversity than treated samples, but this was not significant for either sterile (Welch's t-test; t = `r {sprintf("%0.2f", t_shannon_sterile[1])}`, p = `r {t_shannon_sterile[3]}`) or live dust conditions (Welch's t-test; t = `r {sprintf("%0.2f", t_shannon_live[1])}`, p = `r {t_shannon_live[3]}`). Live dust, on the other hand, had significantly higher alpha diversity than sterile dust for both treatment (Welch's t-test; t = `r {sprintf("%0.2f", t_shannon_treat_EB[1])}`, p `r {format.pval(t_shannon_treat_EB[3], digits=3, eps=0.001)}`) and control samples (Welch's t-test; t = `r {sprintf("%0.2f", t_shannon_treat_control[1])}`, p`r {format.pval(t_shannon_treat_control[3], digits=3, eps=0.001)}`).
+
+```{r shannonPlots, eval=TRUE, include=TRUE, results="hide", out.width='.49\\linewidth', fig.width=5, fig.height=4, fig.show="hold", fig.align="center", fig.cap="\\label{fig:shannonPlots}Alpha diversity by treatment for both sterile and live dust"}
+
+# plot alpha diversity for sterile dust
+
+sterile.rich <- estimate_richness(sterile, measures="Shannon")
+sterile.rich$Treatment <- "EnviroBiotics"
+sterile.rich[c(grep("C_", row.names(sterile.rich))),"Treatment"] <- "Control"
+ggplot(sterile.rich, aes(x=Treatment, y=Shannon, color=Treatment)) +
+  labs(title="Sterile dust") +
+  geom_boxplot() +
+  scale_color_manual(values=treatment.pal) +
+  ylim(0, 7) +
+  theme(legend.position = "none", axis.text.x=element_text(angle=0))
+ggsave("shannon_sterile.pdf")
+
+# plot alpha diversity for live dust
+live.rich <- estimate_richness(live, measures="Shannon")
+live.rich$Treatment <- "EnviroBiotics"
+live.rich[c(grep("C_", row.names(live.rich))),"Treatment"] <- "Control"
+ggplot(live.rich, aes(x=Treatment, y=Shannon, color=Treatment)) +
+  labs(title="Live dust") +
+  geom_boxplot() +
+  scale_color_manual(values=treatment.pal) +
+  ylim(0, 7) +
+  theme(legend.position = "none", axis.text.x=element_text(angle=0))
+ggsave("shannon_live.pdf")
+
+```
+
+### Bacterial community structure
+
+We comparing the top 25 most abundant genera in treated and control samples containing live dust (Figure \ref{fig:bar25_genus_live}), as well as those containing sterile dust (Figure \ref{fig:bar25_genus_sterile}). No clear differences were observed between treated and control samples in either case, when looking at only the top 25 most abundant genera.
+
+```{r bar25_genus_sterile, eval=TRUE, include=TRUE, results="hide", message=FALSE, warning=FALSE, error=TRUE, fig.width=6.5, fig.height=4, fig.show="hold", fig.align="center", fig.cap="\\label{fig:bar25_genus_sterile}Top 25 most abundant taxa in sterile dust for both control (left) and treated (right) samples."}
+
+## get top 25 most abundant Families, merge remaining Families into "Other," and glom by Family
+sort.tax <- sort(tapply(taxa_sums(sterile), tax_table(sterile)[, "Genus"], sum), TRUE)
+length(sort.tax)
+top.tax <- sort.tax[1:25] #what are the top 25 most abundant Families across the whole study?
+bottom.tax <- sort.tax[26:length(sort.tax)]
+top.sub <- subset_taxa(sterile, Genus %in% names(top.tax)) #get top 25 most abundant Genus
+bottom.sub <- subset_taxa(sterile, Genus %in% names(bottom.tax)) #get all other taxa
+bottom.sub.m <- merge_taxa(sterile, taxa_names(bottom.sub), archetype=1) #merge all other taxa into Genus "Other"
+tax_table(bottom.sub.m)[,6][is.na(tax_table(bottom.sub.m)[,6])] <- "Other"
+bottom.sub.m <- tax_glom(bottom.sub.m, taxrank="Genus")
+write.csv(get_taxa_unique(bottom.sub, "Genus"), "bar25_genus_sterile_fung.csv")
+
+## stacked barplots to compare proportional composition 
+#bottom.sub.rel <- merge_samples(bottom.sub, "Replicate")
+#sample_data(bottom.sub.rel)$Replicate <- levels(factor(sample_data(bottom.sub)$Replicate))
+bottom.sub.rel <- transform_sample_counts(bottom.sub.m, function(x) 100 * x/sum(x))
+# reorder samples by Condition
+sample_data(bottom.sub.rel)$Sample <- factor(
+  sample_data(bottom.sub.rel)$Sample, levels=sample_data(bottom.sub.rel)$Sample[order(sample_data(bottom.sub.rel)$Treatment,
+                                                                            sample_data(bottom.sub.rel)$Day)])
+df_long <- psmelt(bottom.sub.rel) # first change to long format
+old.lvl <- levels(df_long$Genus)
+df_long$Genus <- factor(df_long$Genus, levels=c("Other", sort(old.lvl[old.lvl!="Other"], decreasing=F)))
+df_long$Sample <- factor(df_long$Sample, levels=unique(df_long$Sample[order(df_long$Treatment, df_long$Day)]))
+
+ggplot(df_long, aes(x=Sample, y=Abundance, fill = Genus)) + 
+  geom_bar(stat="identity", position="stack") + 
+  labs(x="Sample", y="Percentage of Sequences") +
+  scale_fill_manual(values=genus.pal, na.value="darkgrey") +
+  scale_color_manual(values=genus.pal, na.value="darkgrey") + 
+  theme(axis.title=element_text(size=12), axis.text.x=element_text(angle=90, size=6, hjust=1, vjust=0.5), 
+        legend.text=element_text(size=8), legend.key.size = unit(0.16,"in")) 
+
+ggsave("bar25_genus_sterile_fung.pdf", device="pdf", width=7, height=4, units="in", useDingbats=FALSE)
+
+#rm(sort.tax, top.tax, bottom.tax, bact1, bottom.sub, bottom.sub.rel, df_long, old.lvl, pal)
+
+```
+
+```{r bar25_genus_live, eval=TRUE, include=TRUE, results="hide", message=FALSE, warning=FALSE, error=TRUE, fig.width=6.5, fig.height=4, fig.show="hold", fig.align="center", fig.cap="\\label{fig:bar25_genus_live}Top 25 most abundant taxa in live dust for both control (left) and treated (right) samples."}
+
+## get top 25 most abundant Families, merge remaining Families into "Other," and glom by Family
+sort.tax <- sort(tapply(taxa_sums(live), tax_table(live)[, "Genus"], sum), TRUE)
+length(sort.tax)
+top.tax <- sort.tax[1:25] #what are the top 25 most abundant Families across the whole study?
+bottom.tax <- sort.tax[26:length(sort.tax)]
+#live1 <- subset_taxa(live, Genus %in% names(top.tax)) #get top 25 most abundant Genus
+bottom.sub <- subset_taxa(live, Genus %in% names(bottom.tax)) #get all other taxa
+bottom.sub <- merge_taxa(live, taxa_names(bottom.sub), archetype=1) #merge all other taxa into Genus "Other"
+tax_table(bottom.sub)[,6][is.na(tax_table(bottom.sub)[,6])] <- "Other"
+bottom.sub <- tax_glom(bottom.sub, taxrank="Genus")
+write.csv(get_taxa_unique(bottom.sub, "Genus"), "bar25_genus_live_fung.csv")
+
+## stacked barplots to compare proportional composition 
+#bottom.sub.rel <- merge_samples(bottom.sub, "Replicate")
+#sample_data(bottom.sub.rel)$Replicate <- levels(factor(sample_data(bottom.sub)$Replicate))
+bottom.sub.rel <- transform_sample_counts(bottom.sub, function(x) 100 * x/sum(x))
+# reorder samples by Condition
+sample_data(bottom.sub.rel)$Sample <- factor(
+  sample_data(bottom.sub.rel)$Sample, levels=sample_data(bottom.sub.rel)$Sample[order(sample_data(bottom.sub.rel)$Treatment,
+                                                                            sample_data(bottom.sub.rel)$Day)])
+df_long <- psmelt(bottom.sub.rel) # first change to long format
+old.lvl <- levels(df_long$Genus)
+df_long$Genus <- factor(df_long$Genus, levels=c("Other", sort(old.lvl[old.lvl!="Other"], decreasing=F)))
+df_long$Sample <- factor(df_long$Sample, levels=unique(df_long$Sample[order(df_long$Treatment, df_long$Day)]))
+
+ggplot(df_long, aes(x=Sample, y=Abundance, fill = Genus)) + 
+  geom_bar(stat="identity", position="stack") + 
+  labs(x="Sample", y="Percentage of Sequences") +
+  scale_fill_manual(values=genus.pal, na.value="darkgrey") +
+  scale_color_manual(values=genus.pal, na.value="darkgrey") + 
+  theme(axis.title=element_text(size=12), axis.text.x=element_text(angle=90, size=6, hjust=1, vjust=0.5), 
+        legend.text=element_text(size=8), legend.key.size = unit(0.16,"in"), legend.position = "none") 
+
+ggsave("bar25_genus_live_fung.pdf", device="pdf", width=7, height=4, units="in", useDingbats=FALSE)
+
+#rm(sort.tax, top.tax, bottom.tax, bact1, bottom.sub, bottom.sub.rel, df_long, old.lvl, pal)
+
+```
+
+```{r bar25_genus_EB, eval=FALSE, include=TRUE, results="hide", message=FALSE, warning=FALSE, error=TRUE, fig.width=5, fig.height=4, fig.show="hold", fig.align="center", fig.cap="\\label{fig:bar25_genus_EB}Treatment effects by dust condition (sterile vs. live)."}
+
+## get top 25 most abundant Families, merge remaining Families into "Other," and glom by Genus
+sort.tax <- sort(tapply(taxa_sums(EB), tax_table(EB)[, "Genus"], sum), TRUE)
+length(sort.tax)
+top.tax <- sort.tax[1:25] #what are the top 25 most abundant Families across the whole study?
+bottom.tax <- sort.tax[26:length(sort.tax)]
+#top.sub <- subset_taxa(EB, Genus %in% names(top.tax)) #get top 25 most abundant Genus
+bottom.sub <- subset_taxa(EB, Genus %in% names(bottom.tax)) #get all other taxa
+bottom.sub <- merge_taxa(EB, taxa_names(bottom.sub), archetype=1) #merge all other taxa into Genus "Other"
+tax_table(bottom.sub)[,6][is.na(tax_table(bottom.sub)[,6])] <- "Other"
+bottom.sub <- tax_glom(bottom.sub, taxrank="Genus")
+write.csv(get_taxa_unique(bottom.sub, "Genus"), "bar25_genus_EB_fung.csv")
+
+## stacked barplots to compare proportional composition 
+#bottom.sub.rel <- merge_samples(bottom.sub, "Replicate")
+#sample_data(bottom.sub.rel)$Replicate <- levels(factor(sample_data(bottom.sub)$Replicate))
+bottom.sub.rel <- transform_sample_counts(bottom.sub, function(x) 100 * x/sum(x))
+# reorder samples by Condition
+sample_data(bottom.sub.rel)$Sample <- factor(
+  sample_data(bottom.sub.rel)$Sample, levels=sample_data(bottom.sub.rel)$Sample[order(sample_data(bottom.sub.rel)$Condition,
+                                                                            sample_data(bottom.sub.rel)$Day)])
+df_long <- psmelt(bottom.sub.rel) # first change to long format
+old.lvl <- levels(df_long$Genus)
+df_long$Genus <- factor(df_long$Genus, levels=c("Other", sort(old.lvl[old.lvl!="Other"], decreasing=F)))
+
+ggplot(df_long, aes(x=Sample, y=Abundance, fill = Genus)) + 
+  geom_bar(stat="identity", position="stack") + 
+  labs(x="Sample", y="Percentage of Sequences", 
+       title="Top 25 most abundant bacterial families in treated samples across live and sterile dust") + 
+  scale_fill_manual(values=genus.pal, na.value="darkgrey") +
+  scale_color_manual(values=genus.pal, na.value="darkgrey") + 
+  theme(axis.title=element_text(size=12), axis.text.x=element_text(angle=90, size=6, hjust=1, vjust=0.5), 
+        legend.text=element_text(size=8), legend.key.size = unit(0.16,"in")) 
+
+ggsave("bar25_genus_EB_fung.pdf", device="pdf", width=7, height=4, units="in", useDingbats=FALSE)
+
+#rm(sort.tax, top.tax, bottom.tax, bact1, bottom.sub, bottom.sub.rel, df_long, old.lvl, pal)
+
+```
+
+```{r bar25_genus_control, eval=FALSE, include=TRUE, results="hide", message=FALSE, warning=FALSE, error=TRUE, fig.width=5, fig.height=4, fig.show="hold", fig.align="center", fig.cap="\\label{fig:bar25_genus_control}Treatment effects by dust condition (sterile vs. live)."}
+
+## get top 25 most abundant Families, merge remaining Families into "Other," and glom by Genus
+sort.tax <- sort(tapply(taxa_sums(control), tax_table(control)[, "Genus"], sum), TRUE)
+length(sort.tax)
+top.tax <- sort.tax[1:25] #what are the top 25 most abundant Families across the whole study?
+bottom.tax <- sort.tax[26:length(sort.tax)]
+#top.sub <- subset_taxa(control, Genus %in% names(top.tax)) #get top 25 most abundant Genus
+bottom.sub <- subset_taxa(control, Genus %in% names(bottom.tax)) #get all other taxa
+bottom.sub <- merge_taxa(control, taxa_names(bottom.sub), archetype=1) #merge all other taxa into Genus "Other"
+tax_table(bottom.sub)[,6][is.na(tax_table(bottom.sub)[,6])] <- "Other"
+bottom.sub <- tax_glom(bottom.sub, taxrank="Genus")
+write.csv(get_taxa_unique(bottom.sub, "Genus"), "bar25_genus_control_fung.csv")
+
+## stacked barplots to compare proportional composition 
+#bottom.sub.rel <- merge_samples(bottom.sub, "Replicate")
+#sample_data(bottom.sub.rel)$Replicate <- levels(factor(sample_data(bottom.sub)$Replicate))
+bottom.sub.rel <- transform_sample_counts(bottom.sub, function(x) 100 * x/sum(x))
+# reorder samples by Condition
+sample_data(bottom.sub.rel)$Sample <- factor(
+  sample_data(bottom.sub.rel)$Sample, levels=sample_data(bottom.sub.rel)$Sample[order(sample_data(bottom.sub.rel)$Condition,
+                                                                            sample_data(bottom.sub.rel)$Day)])
+df_long <- psmelt(bottom.sub.rel) # first change to long format
+old.lvl <- levels(df_long$Genus)
+df_long$Genus <- factor(df_long$Genus, levels=c("Other", sort(old.lvl[old.lvl!="Other"], decreasing=F)))
+
+ggplot(df_long, aes(x=Sample, y=Abundance, fill = Genus)) + 
+  geom_bar(stat="identity", position="stack") + 
+  labs(x="Sample", y="Percentage of Sequences", 
+       title="Top 25 most abundant bacterial genera in control samples across live and sterile dust") + 
+  scale_fill_manual(values=genus.pal, na.value="darkgrey") +
+  scale_color_manual(values=genus.pal, na.value="darkgrey") + 
+  theme(axis.title=element_text(size=12), axis.text.x=element_text(angle=90, size=6, hjust=1, vjust=0.5), 
+        legend.text=element_text(size=8), legend.key.size = unit(0.16,"in")) 
+
+ggsave("bar25_genus_control_fung.pdf", device="pdf", width=7, height=4, units="in", useDingbats=FALSE)
+
+rm(sort.tax, top.tax, bottom.tax, bact1, bottom.sub, bottom.sub.rel, df_long, old.lvl, pal)
+
+```
+
+### Beta Diversity
+
+We visualized patterns in beta diversity using principal coordinates analysis (PCoA) ordination and Morisita-Horn distance. Live dust samples formed a tight cluster, while sterile dust clustered only very loosely; there was no clear patterning by treatment in the exploratory ordination (Figure \ref{fig:initialOrd}).
+
+```{r initialOrd, eval=TRUE, include=TRUE, results="hide", message=FALSE, warning=FALSE, error=TRUE, fig.width=6.5, fig.height=4, fig.show="hold", fig.align="center", fig.cap="\\label{fig:initialOrd}Exploratory PCoA ordination on Morisita-Horn distances (all samples)."}
+
+# explore similarity among all samples, including vents, controls, and pure EnviroBiotic solution
+plot_ordination(fung, ordinate(fung, method="PCoA", distance="horn"), type="samples", color="Condition", label="Sample")
+
+ggsave("initialOrd.pdf")
+
+```
+
+```{r betaDiv_condition, eval=TRUE, include=TRUE, results="hide", message=FALSE, warning=FALSE, error=TRUE, fig.width=6.5, fig.height=4, fig.show="hold", fig.align="center", fig.cap="\\label{fig:betaDiv_condition}Treatment effects by sampling period on sterile (top) vs. live dust (bottom)."}
+
+pt.pal <- c("red", "orange", "goldenrod3", "green", "blue", "orchid", "brown")
+sample_data(sterile.vst)$pt <- as.factor(paste0(sample_data(sterile.vst)$Period, "-", sample_data(sterile.vst)$Treatment))
+
+# PCoA on Morisita-Horn distance
+plot_ordination(sterile.vst,  ordinate(sterile.vst, method="PCoA", distance="horn"), 
+                type = "samples", color="Period", shape="Treatment", label="Day") +
+  scale_color_manual(values=period.pal)
+ggsave("betaDiv_condition_sterile.pdf")
+
+sample_data(live.vst)$pt <- as.factor(paste0(sample_data(live.vst)$Period, "-", sample_data(live.vst)$Treatment))
+
+plot_ordination(live.vst, ordinate(live.vst, method = "PCoA", distance = "horn"), 
+                type = "samples", color="Period", shape="Treatment", label = "Day") +
+  scale_color_manual(values=period.pal)
+ggsave("betaDiv_condition_live.pdf")
+
+```
+
+```{r hypTest, eval=FALSE, include=TRUE, results="hide", message=FALSE, warning=FALSE, error=TRUE, fig.width=6.5, fig.height=3, fig.show="hold", fig.align="center", fig.cap="\\label{fig:hypTest}Effect of increasing buffer size on strength of association between amount of vegetation and community similarity."}
+
+# PERMANOVA for variables of interest
+tab.vst <- getTab(nosing.vst)
+env.vst <- data.frame(sample_data(nosing.vst))
+
+varlist <- c("Condition", "Treatment", "Day", "Period")
+adonisRes <- list()
+for (i in varlist){ 
+           form <- as.formula(paste("tab.vst", i, sep="~"))
+           adonisRes[[i]] <- adonis(form, data=env.vst, perm=9999, method="horn")
+           }   
+#knitr::kable(adonisRes)
+sink("adonisResults.txt")
+adonisRes
+sink()
+
+# separate live and sterile dust conditions
+sterile.tab.vst <- getTab(sterile.vst)
+sterile.env.vst <- data.frame(sample_data(sterile.vst))
+live.tab.vst <- getTab(live.vst)
+live.env.vst <- data.frame(sample_data(live.vst))
+
+#multivariate test to see interactions
+adonis.multi <- adonis(sterile.tab.vst ~ Treatment*Period, data=sterile.env.vst, perm=9999, method="horn")
+adonis.multi <- adonis(live.tab.vst ~ Treatment*Period, data=live.env.vst, perm=9999, method="horn")
+
+```
+
+```{r deseq_sterile, eval=FALSE, include=TRUE, results="hide", message=FALSE, warning=FALSE, error=TRUE, fig.width=6.5, fig.height=3, fig.show="hold", fig.align="center", fig.cap="\\label{fig:deseq_sterile}Effect of increasing buffer size on strength of association between amount of vegetation and community similarity."}
+# multiple test using negative binomial GLM fitting and Wald statistics
+# levels are alphabetical (i.e. control, EnviroBiotics) & "untreated" is first
+# results of urb.nosing.des (~ Nearby_Veg) vs. des2 (~ Date + Nearby_Veg)
+
+#Subsetting to only pairs of groups for running DESeq() can be useful when the within-group variance is very different across groups
+
+#In order to test for any differences over multiple time points, once can use a design including the time factor, and then test using the likelihood ratio test as described in Section 3.5, where the time factor is removed in the reduced formula.
+
+des <- phyloseq_to_deseq2(sterile, ~ Period + Treatment)
+# calculate geometric means prior to estimate size factors if error with too many zeros
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(des), 1, gm_mean)
+des <- estimateSizeFactors(des, geoMeans = geoMeans)
+des <- estimateDispersions(des, fitType="local", maxit=260)
+
+glm <- DESeq(des, test="Wald", fitType="parametric")
+
+res.glm <- results(glm, cooksCutoff=TRUE, alpha=0.05)
+summary(res.glm)
+mcols(res.glm, use.names=TRUE) #EnviroBiotics vs Control (so positive L2fc values means upregulated 
+                                       #in treated samples and negative means downregulated in treated samples)
+res.glm.df <- subset(res.glm, padj < 0.05)
+res.glm.df <- cbind(as(res.glm.df, "data.frame"), 
+                as(tax_table(sterile)[rownames(res.glm.df),], "matrix"),
+                as(t(otu_table(sterile.rel)[,rownames(res.glm.df)]), "matrix"),
+                as(taxa_sums(sterile.rel)[rownames(res.glm.df)], "matrix"),
+                stringsAsFactors=FALSE
+                )
+res.glm.df <- res.glm.df[order(res.glm.df$log2FoldChange),]
+res.glm.df$EnviroBiotics <- "depaupered"
+res.glm.df$EnviroBiotics[res.glm.df$log2FoldChange >= 0] <- "enriched"
+res.glm.df$EnviroBiotics <- as.factor(res.glm.df$EnviroBiotics)
+`r knitr::kable(res.glm.df)`
+write.csv(res.glm.df, file="deseq_sterile.csv")
+length(res.glm.df[,1])
+
+# create positive-negative barplot of differentially abundant taxa
+sigplot_sterile <- data.frame(row.names(res.glm.df),
+                      res.glm.df$Class,
+                      res.glm.df$Order,
+                      res.glm.df$Family,
+                      res.glm.df$Genus,
+                      res.glm.df$log2FoldChange,
+                      res.glm.df$EnviroBiotics,
+                      stringsAsFactors = FALSE)
+names(sigplot_sterile) <- c("SequenceVariant", "Class", "Order", "Family", "Genus", "log2FoldChange", "EnviroBiotics")
+#sigGenusList <- sigplot_sterile$Genus
+#sigplot_sterile$Genus <- gsub("Clostridium_sensu_stricto", "Clostridium", sigplot_sterile$Genus)
+
+ggplot(sigplot_sterile, aes(x = reorder(SequenceVariant, log2FoldChange), y = log2FoldChange, 
+                    fill=Family, legend="")) + 
+  geom_bar(stat = "identity", position = "identity") +
+  scale_fill_manual(values=rainbow(length(unique(sigplot_sterile$Family))), drop=FALSE) +
+  coord_flip() +
+  scale_x_discrete(labels=sigplot_sterile$Family) +
+  #scale_y_continuous(limits=c(-2,2), breaks=c(-2, -1, 0, 1, 2)) +
+  labs(x="Family", y="l2FC") +
+  theme(aspect.ratio=3, legend.position="none", axis.text=element_text(size=10),
+        axis.title=element_text(size=12) 
+  )
+
+ggsave("deseq_sterile.pdf", device="pdf", width=5, height=9, units="in")
+
+```
+
+```{r deseq_live, eval=FALSE, include=TRUE, results="hide", message=FALSE, warning=FALSE, error=TRUE, fig.width=6.5, fig.height=3, fig.show="hold", fig.align="center", fig.cap="\\label{fig:deseq_live}Effect of increasing buffer size on strength of association between amount of vegetation and community similarity."}
+# multiple test using negative binomial GLM fitting and Wald statistics
+# levels are alphabetical (i.e. control, EnviroBiotics) & "untreated" is first
+# results of urb.nosing.des (~ Nearby_Veg) vs. des2 (~ Date + Nearby_Veg)
+
+#Subsetting to only pairs of groups for running DESeq() can be useful when the within-group variance is very different across groups
+
+#In order to test for any differences over multiple time points, once can use a design including the time factor, and then test using the likelihood ratio test as described in Section 3.5, where the time factor is removed in the reduced formula.
+
+des <- phyloseq_to_deseq2(live, ~ Period + Treatment)
+# calculate geometric means prior to estimate size factors if error with too many zeros
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(des), 1, gm_mean)
+des <- estimateSizeFactors(des, geoMeans = geoMeans)
+des <- estimateDispersions(des, fitType="local", maxit=260)
+
+glm <- DESeq(des, test="Wald", fitType="parametric")
+
+res.glm <- results(glm, cooksCutoff=TRUE, alpha=0.05)
+summary(res.glm)
+mcols(res.glm, use.names=TRUE) #EnviroBiotics vs Control (so positive L2fc values means upregulated 
+                                       #in treated samples and negative means downregulated in treated samples)
+res.glm.df <- subset(res.glm, padj < 0.05)
+res.glm.df <- cbind(as(res.glm.df, "data.frame"), 
+                as(tax_table(live)[rownames(res.glm.df),], "matrix"),
+                as(t(otu_table(live.rel)[,rownames(res.glm.df)]), "matrix"),
+                as(taxa_sums(live.rel)[rownames(res.glm.df)], "matrix"),
+                stringsAsFactors=FALSE
+                )
+res.glm.df <- res.glm.df[order(res.glm.df$log2FoldChange),]
+res.glm.df$EnviroBiotics <- "depaupered"
+res.glm.df$EnviroBiotics[res.glm.df$log2FoldChange >= 0] <- "enriched"
+res.glm.df$EnviroBiotics <- as.factor(res.glm.df$EnviroBiotics)
+#`r knitr::kable(res.glm.df)`
+write.csv(res.glm.df, file="deseq_live.csv")
+length(res.glm.df[,1])
+
+# create positive-negative barplot of differentially abundant taxa
+sigplot <- data.frame(row.names(res.glm.df),
+                      res.glm.df$Class,
+                      res.glm.df$Order,
+                      res.glm.df$Family,
+                      res.glm.df$Genus,
+                      res.glm.df$log2FoldChange,
+                      res.glm.df$EnviroBiotics,
+                      stringsAsFactors = FALSE)
+names(sigplot) <- c("SequenceVariant", "Class", "Order", "Family", "Genus", "log2FoldChange", "EnviroBiotics")
+#sigGenusList <- sigplot_live$Genus
+#sigplot_live$Genus <- gsub("Clostridium_sensu_stricto", "Clostridium", sigplot_live$Genus)
+
+ggplot(sigplot, aes(x = reorder(SequenceVariant, log2FoldChange), y = log2FoldChange, 
+                    fill=Family, legend="")) + 
+  geom_bar(stat = "identity", position = "identity") +
+  scale_fill_manual(values=rainbow(length(unique(sigplot$Family))), drop=FALSE) +
+  coord_flip() +
+  scale_x_discrete(labels=sigplot$Family) +
+  #scale_y_continuous(limits=c(-2,2), breaks=c(-2, -1, 0, 1, 2)) +
+  labs(x="Family", y="l2FC") +
+  theme(aspect.ratio=3, legend.position="none", axis.text=element_text(size=10),
+        axis.title=element_text(size=12) 
+  )
+
+ggsave("deseq_live.pdf", device="pdf", width=5, height=9, units="in")
+
+```
+
+```{r rareAbund, eval=FALSE, echo=FALSE}
+
+#Investigate abundant vs. common vs. rare taxa, as in "rare biosphere" papers 
+#(Logares et al. 2014). We used the raw counts, transformed to proportional abundance by sample.
+
+# define rare (< 0.1%) taxa, per Pedros Alio (2006)
+petRareRel <- filter_taxa(petMergeRel, function(x) mean(x) < 0.1, TRUE)
+# select rare taxa from untransformed OTU table
+petRare <- prune_taxa(taxa_names(petRareRel), petMerge)
+rev(sort(taxa_sums(petRare)))[1:10]
+ntaxa(petRare)
+
+# define abundant (> 0.1%) taxa
+petAbundRel <- filter_taxa(petMergeRel, function(x) mean(x) > 0.1, TRUE)
+# select abundant taxa from untransformed OTU table
+petAbund <- prune_taxa(taxa_names(petAbundRel), petMerge)
+ntaxa(petAbund)
+
+# transform rare counts for downstream analysis using vst
+petRare_des2 <- phyloseq_to_deseq2(petRare, ~ site_type)
+# calculate geometric means prior to estimate size factors
+gm_mean <- function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+  }
+geoMeans <- apply(counts(petRare_des2), 1, gm_mean)
+petRare_des2 <- estimateSizeFactors(petRare_des2, geoMeans=geoMeans)
+petRare_des2 <- estimateDispersions(petRare_des2, fitType="local", maxit=260)
+# perform DESeq2 variance stabilization instead of rarefying
+petRare_vst <- getVarianceStabilizedData(petRare_des2)
+# Save the untransformed data as a separate variable so you can go back to it
+petRare0 <- petRare
+otu_table(petRare) <- otu_table(petRare_vst, taxa_are_rows=TRUE)
+petRare_vst <- petRare
+petRare <- petRare0
+rm(petRare0)
+# Set values below zero, to zero
+otu_table(petRare_vst)[otu_table(petRare_vst) < 0.0] <- 0
+
+# ordinate rare taxa
+petRareOrd <- ordinate(petRare_vst, "PCoA", "horn")
+ordcapRare <- ordinate(petRare, "CAP", "horn", ~ Green_50m)
+plot_ordination(petRare, petRareOrd, 
+    type="samples", shape="site_type", color="Green_50m") + 
+    geom_point(size=5) + geom_text(label=sample_data(petRare)$location, size=4, vjust=1.3) + 
+    scale_colour_gradientn(colours=rainbow(10, s=0.4, v=0.75, start=0, end=.5, alpha=.8))
+
+# test for statistical differences for rare taxa
+petRareTab <- getTab(petRare)
+petRareEnv <- data.frame(sample_data(petRare))
+adonisRareSite <- adonis(petRareTab ~ site_type, petRareEnv, perm=9999, method="horn")
+adonisRareSite
+adonisRareVeg <- adonis(petRareTab ~ Green_50m, petRareEnv, perm=9999, method="horn")
+adonisRareVeg
+
+# plot abundant taxa
+# transform petri counts for downstream analysis using vst
+petAbund_des2 <- phyloseq_to_deseq2(petAbund, ~ site_type)
+petAbund_des2 <- estimateSizeFactors(petAbund_des2)
+petAbund_des2 <- estimateDispersions(petAbund_des2, fitType="local", maxit=260)
+# perform DESeq2 variance stabilization instead of rarefying
+petAbund_vst <- getVarianceStabilizedData(petAbund_des2)
+# Save the untransformed data as a separate variable so you can go back to it
+petAbund0 <- petAbund
+otu_table(petAbund) <- otu_table(petAbund_vst, taxa_are_rows=TRUE)
+petAbund_vst <- petAbund
+petAbund <- petAbund0
+rm(petAbund0)
+# Set values below zero, to zero
+otu_table(petAbund_vst)[otu_table(petAbund_vst) < 0.0] <- 0
+
+petAbundOrd <- ordinate(petAbund, "PCoA", "horn")
+plot_ordination(petAbund, petAbundOrd, 
+    type="samples", shape="site_type", color="Green_200m") + 
+    geom_point(size=5) + geom_text(label=sample_data(petAbund)$location, size=4, vjust=1.3) + 
+    scale_colour_gradientn(colours=rainbow(10, s=0.4, v=0.75, start=0, end=.5, alpha=.8))
+
+petAbundTab <- getTab(petAbund_vst)
+petAbundEnv <- data.frame(sample_data(petAbund_vst))
+adonisAbuSite <- adonis(petAbundTab ~ site_type, petAbundEnv, perm=9999, method="horn")
+adonisAbuSite
+adonisAbuVeg <- adonis(petAbundTab ~ Green_50m, petAbundEnv, perm=9999, method="horn")
+adonisAbuVeg
+
+```
+
+# Change over time
+
+```{r taxa_EB, eval=TRUE, include=TRUE, results="hide", message=FALSE, warning=FALSE, error=TRUE, fig.width=6.5, fig.height=5.5, fig.show="hold", fig.align="center", fig.cap="\\label{fig:bar25_genus_sterile}Treatment effects by dust condition (sterile vs. live)."}
+
+# make data frame for plotting
+topEB.fun <- function(x){data.frame("Sample" = row.names(sample_data(exp.Rel)),
+                                   "Taxon" = x,
+                                   "Rel.Abund" = get_sample(exp.Rel, x),
+                                   "Genus" = tax_table(exp.Rel)[row.names(tax_table(exp.Rel))==x,6],
+                                   "Day" = sample_data(exp.Rel)$Day,
+                                   "Treatment" = sample_data(exp.Rel)$Treatment,
+                                   "Condition" = sample_data(exp.Rel)$Condition
+)
+}
+
+top4SV_EB <- ldply(top.names, topEB.fun)
+max(top4SV_EB$Rel.Abund)
+# plot relative abundance over time, faceted by Condition + Treatment
+ggplot(top4SV_EB, aes(x=Day, y=Rel.Abund, color=Taxon)) +
+  geom_point(aes(label=Sample)) +
+  facet_wrap(~Condition + Treatment)
+
+```
+
+# Conclusion
+
+We demonstrated that probiotic treatment alters community structure *after* the course of treatment, but no clear effects during treatment. This report does not provide evidence that treatment can shift the long-term stable state of a community.
+
+
+
